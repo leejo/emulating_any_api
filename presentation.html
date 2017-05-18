@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Emulating Any API</title>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
+    <style type="text/css">
+      @import url(https://fonts.googleapis.com/css?family=Yanone+Kaffeesatz);
+      @import url(https://fonts.googleapis.com/css?family=Droid+Serif:400,700,400italic);
+      @import url(https://fonts.googleapis.com/css?family=Ubuntu+Mono:400,700,400italic);
+
+      body { font-family: 'Droid Serif'; }
+      h1, h2, h3 {
+        font-family: 'Yanone Kaffeesatz';
+        font-weight: normal;
+      }
+      .remark-code, .remark-inline-code { font-family: 'Ubuntu Mono'; }
+    </style>
+  </head>
+  <body>
+    <textarea id="source">
+
+class: center, middle
+
+# Emulating Any API
+
+???
+Last year gave a talk building and testing API client libraries
+
+"Write an emulator" was my conclusion
+
+But writing an emulator is a pain, and i'm lazy, so I wanted to automate that
+
+Surely that's possible?
+---
+# Any API?
+
+--
+
+- Any API that has an OpenAPI/Swagger specification
+--
+
+- OpenAPI/Swagger specs define response data JSON schema for validation
+--
+
+- So we can use those to generate example responses
+--
+
+- The API doesn't have an OpenAPI/Swagger specification?
+--
+
+- Look here: https://github.com/APIs-guru/openapi-directory
+
+---
+# JSON::Schema::ToJSON
+
+```perl
+use JSON::Schema::ToJSON;
+use JSON;
+
+my $data = JSON::Schema::ToJSON->new
+    ->json_schema_to_json( schema_str => <<'EndOfSchema'
+{
+    "title": "Person",
+    "type": "object",
+    "properties": {
+        "firstName": { "type": "string" },
+        "lastName": { "type": "string" },
+        "age": {
+            "description": "Age in years",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 117
+        }
+    },
+    "required": ["firstName", "lastName"]
+}
+EndOfSchema
+   	);
+
+say encode_json( $data );
+```
+
+???
+This distribution is named badly, sorry
+
+Hopefully the documentation makes it more discoverable
+
+---
+# JSON::Schema::ToJSON
+
+```sh
+> perl examples/json_schema_to_json.pl | jq
+{
+  "lastName": "(qtfHyv~OF%WbE}1.oD>._-2_rp8y-AXkc@]zQZ]Sh\"hzY",
+  "age": 101,
+  "firstName": "+mp)<}<b*\\(|Sb&3Cu]_&?IR-/P"
+}
+```
+--
+
+```sh
+> perl examples/json_schema_to_json.pl | jq
+{
+  "firstName": "9&oB[RU8F^#w?n5VDV",
+  "lastName": "!E#Hw1Q?funAd(j69oZt%BU9n4\"NR$hs:Rwl&",
+  "age": 56
+}
+```
+--
+
+```sh
+> perl examples/json_schema_to_json.pl | jq
+{
+  "age": 27,
+  "firstName": "A8<<Y.P2A(|IfIRy;#]Do&v\\>\"aE1,<F~z\\E",
+  "lastName": "}0u\\][13nMpb)}=NTT,.W2.FV~{Q);2,*[%d6@E9?0k^"
+}
+```
+
+???
+note generated stuct is representative whereas values are not
+
+you can supply an "example" key in the JSON schema to set values to something more meaningful
+
+---
+# Combined With Mojolicious::Plugin::OpenAPI
+
+```perl
+#!perl
+
+use Mojolicious::Lite; # "strict", "warnings", "utf8" and Perl 5.10 features
+use Mojo::JSON;
+use JSON::Schema::ToJSON;
+
+my $usage       = "$0 <spec_uri> <base_path> [<example_key>]";
+my $spec_uri    = shift || die "Need a spec URI: $usage";
+my $base        = shift || die "Need base path: $usage";
+my $example_key = shift;
+
+plugin OpenAPI => {
+   route    => app->routes->under( $base )->to( cb => sub { 1; } ),
+   url      => $spec_uri,
+   renderer => \&renderer,
+};
+
+app->start;
+```
+---
+# Combined With Mojolicious::Plugin::OpenAPI
+
+```perl
+#!perl
+
+use Mojolicious::Lite; # "strict", "warnings", "utf8" and Perl 5.10 features
+use Mojo::JSON;
+use JSON::Schema::ToJSON;
+
+my $usage       = "$0 <spec_uri> <base_path> [<example_key>]";
+my $spec_uri    = shift || die "Need a spec URI: $usage";
+my $base        = shift || die "Need base path: $usage";
+my $example_key = shift;
+
+plugin OpenAPI => {
+   route    => app->routes->under( $base )->to( cb => sub { 1; } ),
+   url      => $spec_uri,
+*  renderer => \&renderer,
+};
+
+app->start;
+```
+
+???
+Key bit where we override the default renderer of the plugin 
+
+You can add more plugins to emulate OAuth2, etc
+
+---
+# The Emulation Bit
+
+```perl
+sub renderer {
+    my ( $c,$data ) = @_;
+
+    if ( $data->{status} == 501 ) { # "Not Implemented"
+
+        if (
+            my ( $response ) = grep { /^2/ }
+                sort keys %{ $c->openapi->spec->{responses} }
+        ) {
+            my $schema = $c->openapi->spec->{responses}{$response}{schema};
+
+            $data = JSON::Schema::ToJSON->new( example_key => 'x-example' )
+                ->json_schema_to_json( schema => $schema );
+
+            $c->stash( status => $response );
+        }
+    }
+
+    $data->{messages} = delete $data->{errors} if $data->{errors};
+    return Mojo::JSON::encode_json( $data );
+}
+```
+
+---
+# The Emulation Bit
+
+```perl
+sub renderer {
+    my ( $c,$data ) = @_;
+
+*   if ( $data->{status} == 501 ) { # "Not Implemented"
+
+        if (
+            my ( $response ) = grep { /^2/ }
+                sort keys %{ $c->openapi->spec->{responses} }
+        ) {
+            my $schema = $c->openapi->spec->{responses}{$response}{schema};
+
+            $data = JSON::Schema::ToJSON->new( example_key => 'x-example' )
+                ->json_schema_to_json( schema => $schema );
+
+            $c->stash( status => $response );
+        }
+    }
+
+    $data->{messages} = delete $data->{errors} if $data->{errors};
+    return Mojo::JSON::encode_json( $data );
+}
+```
+
+???
+Have we implemented this in our App? Not here
+
+---
+# The Emulation Bit
+
+```perl
+sub renderer {
+    my ( $c,$data ) = @_;
+
+    if ( $data->{status} == 501 ) { # "Not Implemented"
+
+*       if (
+*           my ( $response ) = grep { /^2/ }
+*               sort keys %{ $c->openapi->spec->{responses} }
+*       ) {
+            my $schema = $c->openapi->spec->{responses}{$response}{schema};
+
+            $data = JSON::Schema::ToJSON->new( example_key => 'x-example' )
+                ->json_schema_to_json( schema => $schema );
+
+            $c->stash( status => $response );
+        }
+    }
+
+    $data->{messages} = delete $data->{errors} if $data->{errors};
+    return Mojo::JSON::encode_json( $data );
+}
+```
+
+???
+Do we have a suitable ^2 response code specification in the OpenAPI spec for this route?
+
+---
+# The Emulation Bit
+
+```perl
+sub renderer {
+    my ( $c,$data ) = @_;
+
+    if ( $data->{status} == 501 ) { # "Not Implemented"
+
+        if (
+            my ( $response ) = grep { /^2/ }
+                sort keys %{ $c->openapi->spec->{responses} }
+        ) {
+*           my $schema = $c->openapi->spec->{responses}{$response}{schema};
+
+*           $data = JSON::Schema::ToJSON->new( example_key => 'x-example' )
+*               ->json_schema_to_json( schema => $schema );
+
+            $c->stash( status => $response );
+        }
+    }
+
+    $data->{messages} = delete $data->{errors} if $data->{errors};
+    return Mojo::JSON::encode_json( $data );
+}
+```
+
+???
+Grab the response schema for the current route and feed into JSON::Schema::ToJSON
+
+---
+# The Emulation Bit
+
+```perl
+sub renderer {
+    my ( $c,$data ) = @_;
+
+    if ( $data->{status} == 501 ) { # "Not Implemented"
+
+        if (
+            my ( $response ) = grep { /^2/ }
+                sort keys %{ $c->openapi->spec->{responses} }
+        ) {
+            my $schema = $c->openapi->spec->{responses}{$response}{schema};
+
+            $data = JSON::Schema::ToJSON->new( example_key => 'x-example' )
+                ->json_schema_to_json( schema => $schema );
+
+*           $c->stash( status => $response );
+        }
+    }
+
+    $data->{messages} = delete $data->{errors} if $data->{errors};
+*   return Mojo::JSON::encode_json( $data );
+}
+```
+
+???
+Set new status code and return "emulated" response data
+
+---
+# Running It
+
+```sh
+morbo ./emulators/generic.pl \
+	https://raw.githubusercontent.com/APIs-guru/openapi-directory/\
+master/APIs/instagram.com/1.0.0/swagger.yaml \
+	/v1 \
+	-l 'https://*:3000'
+```
+
+???
+emulators/generic.pl is included with the JSON::Schema::ToJSON dist
+
+---
+# Querying The "API"
+
+```sh
+curl -k 'https://127.0.0.1:3000/v1/media/1' | jq
+```
+
+--
+
+```sh
+{
+  "data": {
+    "attribution": "lB0{y4SkAou:m0;\\=[*t`4i1",
+    "caption": {
+      "created_time": "8<yo-H^C-CMX$'X:tyJ,i[am#",
+      "from": {
+        "full_name": "O2q>Qx5&clkA(PJb;",
+        "id": "Z*d-WAbY0Vu*,-6IV~xd|L%gi45xnqOxT;>+$0eiGxoe=#DE]",
+        "profile_picture": "TL[e)u7(GWIEsD!?$#9yVFM{Drggn}mb_&mAn-Y~_",
+        "username": "O.$mjHGa~[)RS[4aW4#gH!Z/l"
+      },
+      "id": "^2IUhGNJXJG\\w6X",
+      "text": "t}30_!DQTJ*<a|VM:](9X3I)uqb[pt"
+    },
+    "comments": {
+      "count": 323,
+      "data": [
+        {
+          "created_time": "J&Yv]/Mn!z5?\\Q(c",
+          "from": {
+            "id": "j1[KR$Lle3%",
+...
+```
+
+---
+# JSON::Schema::ToJSON Caveats
+
+In the JSON Schema:
+
+- additionalItems: This is ignored
+- additionalProperties and patternProperties: These are also ignored
+- dependencies: This is *also* ignored, possible result of invalid JSON if used
+- oneOf: Only the *first* schema from the oneOf list will be used (which means that the data returned may be invalid against others in the list)
+- not: Currently any not restrictions are ignored as these can be very hand wavy but we will try a "best guess" in the case of "not" : { "type" : ... }
+- max\_depth - defaults to 10 as JSON Schema can be recursive
+
+It is also entirely possible to pass a schema that could never be validated, but will result in a generated structure anyway, example: an integer that has a "minimum" value of 2, "maximum" value of 4, and must be a "multipleOf" 5 - a nonsensical combination.
+
+Note that the data generated is completely random, don't expect it to be the same across runs or calls (set example keys if you want to do this).
+
+    </textarea>
+    <script src="https://remarkjs.com/downloads/remark-latest.min.js" type="text/javascript">
+    </script>
+    <script type="text/javascript">
+        var slideshow = remark.create({
+            highlightLines: true
+        });
+    </script>
+  </body>
+</html>
+
+# vim: ts=4:sw=4:et
